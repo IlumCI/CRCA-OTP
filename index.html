@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jaeger OTP Dashboard (No-Style)</title>
+</head>
+<body>
+  <h1>Jaeger OTP Dashboard</h1>
+
+  <section>
+    <h2>Server</h2>
+    <button id="btnHealth">Check Health</button>
+    <pre id="healthOut"></pre>
+  </section>
+
+  <hr />
+
+  <section>
+    <h2>Auth</h2>
+    <div>
+      <label>Username <input id="username" autocomplete="username"></label><br />
+      <label>Password <input id="password" type="password" autocomplete="current-password"></label><br />
+      <button id="btnLogin">Login</button>
+      <button id="btnLogout">Logout</button>
+    </div>
+    <pre id="authOut"></pre>
+  </section>
+
+  <hr />
+
+  <section>
+    <h2>OTP Request</h2>
+    <div>
+      <label>To (email/phone)
+        <input id="otpTo" placeholder="user@example.com or +370..." />
+      </label><br />
+      <label>Channel
+        <select id="otpChannel">
+          <option value="sms">sms</option>
+          <option value="email">email</option>
+          <option value="totp">totp</option>
+        </select>
+      </label><br />
+      <label>Purpose
+        <input id="otpPurpose" placeholder="login / password_reset / high_risk_action" />
+      </label><br />
+      <button id="btnRequestOtp">Request OTP</button>
+      <button id="btnResendOtp">Resend OTP</button>
+    </div>
+    <pre id="requestOut"></pre>
+  </section>
+
+  <hr />
+
+  <section>
+    <h2>OTP Verify</h2>
+    <div>
+      <label>Request ID <input id="verifyRequestId" placeholder="from request output" /></label><br />
+      <label>Code <input id="verifyCode" inputmode="numeric" placeholder="123456" /></label><br />
+      <button id="btnVerifyOtp">Verify OTP</button>
+    </div>
+    <pre id="verifyOut"></pre>
+  </section>
+
+  <hr />
+
+  <section>
+    <h2>Ops / Monitoring</h2>
+    <div>
+      <label>Stats window
+        <select id="statsWindow">
+          <option value="5m">5m</option>
+          <option value="15m" selected>15m</option>
+          <option value="1h">1h</option>
+          <option value="24h">24h</option>
+        </select>
+      </label>
+      <button id="btnStats">Fetch Stats</button>
+      <button id="btnRequests">Recent Requests</button>
+      <button id="btnAudit">Audit Log</button>
+    </div>
+    <pre id="opsOut"></pre>
+  </section>
+
+  <hr />
+
+  <section>
+    <h2>Console</h2>
+    <button id="btnClear">Clear Output</button>
+    <pre id="console"></pre>
+  </section>
+
+<script>
+(() => {
+  // ---- Config ----
+  // If your server is on another origin, set BASE_URL accordingly.
+  // Example: const BASE_URL = "https://otp.example.com";
+  const BASE_URL = "";
+
+  // ---- State ----
+  let authToken = localStorage.getItem("jaeger_otp_token") || "";
+  let lastRequestId = localStorage.getItem("jaeger_otp_last_request_id") || "";
+
+  // ---- Helpers ----
+  const $ = (id) => document.getElementById(id);
+
+  function log(msg) {
+    const el = $("console");
+    el.textContent += (typeof msg === "string" ? msg : JSON.stringify(msg, null, 2)) + "\n";
+  }
+
+  function setOut(id, data) {
+    $(id).textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  }
+
+  async function api(path, { method = "GET", body, auth = true } = {}) {
+    const headers = { "Accept": "application/json" };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (auth && authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
+    const res = await fetch(BASE_URL + path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+
+    const text = await res.text();
+    let json;
+    try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
+
+    if (!res.ok) {
+      const err = { status: res.status, statusText: res.statusText, body: json };
+      throw err;
+    }
+    return json;
+  }
+
+  function requireToken() {
+    if (!authToken) {
+      throw new Error("Not logged in (missing token).");
+    }
+  }
+
+  // ---- UI Actions ----
+  $("btnHealth").onclick = async () => {
+    setOut("healthOut", "");
+    try {
+      const data = await api("/api/health", { auth: false });
+      setOut("healthOut", data);
+      log({ health: data });
+    } catch (e) {
+      setOut("healthOut", e);
+      log({ health_error: e });
+    }
+  };
+
+  $("btnLogin").onclick = async () => {
+    setOut("authOut", "");
+    try {
+      const username = $("username").value.trim();
+      const password = $("password").value;
+      const data = await api("/api/auth/login", { method: "POST", body: { username, password }, auth: false });
+
+      if (!data || !data.token) throw new Error("Login response missing token.");
+      authToken = data.token;
+      localStorage.setItem("jaeger_otp_token", authToken);
+
+      setOut("authOut", data);
+      log({ login: "ok", expires_at: data.expires_at });
+    } catch (e) {
+      setOut("authOut", e);
+      log({ login_error: e });
+    }
+  };
+
+  $("btnLogout").onclick = async () => {
+    setOut("authOut", "");
+    try {
+      // optional server-side logout
+      if (authToken) {
+        try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
+      }
+      authToken = "";
+      localStorage.removeItem("jaeger_otp_token");
+      setOut("authOut", { logout: "ok" });
+      log("logout ok");
+    } catch (e) {
+      setOut("authOut", e);
+      log({ logout_error: e });
+    }
+  };
+
+  $("btnRequestOtp").onclick = async () => {
+    setOut("requestOut", "");
+    try {
+      requireToken();
+      const to = $("otpTo").value.trim();
+      const channel = $("otpChannel").value;
+      const purpose = $("otpPurpose").value.trim() || "login";
+
+      const data = await api("/api/otp/request", { method: "POST", body: { to, channel, purpose } });
+      setOut("requestOut", data);
+      log({ otp_request: data });
+
+      if (data && data.request_id) {
+        lastRequestId = data.request_id;
+        localStorage.setItem("jaeger_otp_last_request_id", lastRequestId);
+        $("verifyRequestId").value = lastRequestId;
+      }
+    } catch (e) {
+      setOut("requestOut", e);
+      log({ otp_request_error: e });
+    }
+  };
+
+  $("btnResendOtp").onclick = async () => {
+    setOut("requestOut", "");
+    try {
+      requireToken();
+      const request_id = $("verifyRequestId").value.trim() || lastRequestId;
+      if (!request_id) throw new Error("Missing request_id to resend.");
+      const data = await api("/api/otp/resend", { method: "POST", body: { request_id } });
+      setOut("requestOut", data);
+      log({ otp_resend: data });
+    } catch (e) {
+      setOut("requestOut", e);
+      log({ otp_resend_error: e });
+    }
+  };
+
+  $("btnVerifyOtp").onclick = async () => {
+    setOut("verifyOut", "");
+    try {
+      requireToken();
+      const request_id = $("verifyRequestId").value.trim();
+      const code = $("verifyCode").value.trim();
+      if (!request_id) throw new Error("Missing request_id.");
+      if (!code) throw new Error("Missing code.");
+
+      const data = await api("/api/otp/verify", { method: "POST", body: { request_id, code } });
+      setOut("verifyOut", data);
+      log({ otp_verify: data });
+    } catch (e) {
+      setOut("verifyOut", e);
+      log({ otp_verify_error: e });
+    }
+  };
+
+  $("btnStats").onclick = async () => {
+    setOut("opsOut", "");
+    try {
+      requireToken();
+      const window = $("statsWindow").value;
+      const data = await api(`/api/stats?window=${encodeURIComponent(window)}`);
+      setOut("opsOut", data);
+      log({ stats: data });
+    } catch (e) {
+      setOut("opsOut", e);
+      log({ stats_error: e });
+    }
+  };
+
+  $("btnRequests").onclick = async () => {
+    setOut("opsOut", "");
+    try {
+      requireToken();
+      const data = await api("/api/requests?limit=50");
+      setOut("opsOut", data);
+      log({ recent_requests: data });
+    } catch (e) {
+      setOut("opsOut", e);
+      log({ recent_requests_error: e });
+    }
+  };
+
+  $("btnAudit").onclick = async () => {
+    setOut("opsOut", "");
+    try {
+      requireToken();
+      const data = await api("/api/audit?limit=100");
+      setOut("opsOut", data);
+      log({ audit: data });
+    } catch (e) {
+      setOut("opsOut", e);
+      log({ audit_error: e });
+    }
+  };
+
+  $("btnClear").onclick = () => {
+    $("console").textContent = "";
+    $("healthOut").textContent = "";
+    $("authOut").textContent = "";
+    $("requestOut").textContent = "";
+    $("verifyOut").textContent = "";
+    $("opsOut").textContent = "";
+  };
+
+  // ---- Init ----
+  if (lastRequestId) $("verifyRequestId").value = lastRequestId;
+  if (authToken) log("token loaded from localStorage (logged in state assumed)");
+})();
+</script>
+</body>
+</html>
